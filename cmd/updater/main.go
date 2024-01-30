@@ -1,66 +1,75 @@
-// https-server.go
 package main
 
 import (
-	"crypto/tls"
+	"bytes"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"github.com/redhat-appstudio/results-service/pkg/resultsservice"
 	zap2 "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
-	"log"
 	"net/http"
+	"os"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"time"
 )
 
 func main() {
 
 	klog.InitFlags(flag.CommandLine)
+	var resultsServiceUri string
+	var resultsDirectory string
+	var taskRunName string
+	var namespace string
 
-	flag.Parse()
+	flag.StringVar(&resultsServiceUri, "results-service", "", "The URI or the results service")
+	flag.StringVar(&resultsDirectory, "results-directory", "/large-results", "The location of the alternate results directory")
+	flag.StringVar(&taskRunName, "task-run-name", "", "The task run name, should be the value of $(context.taskRun.name)")
+	flag.StringVar(&namespace, "task-run-namespace", "", "The task run name, should be the value of $(context.taskRun.namespace)")
 	opts := zap.Options{
 		TimeEncoder: zapcore.RFC3339TimeEncoder,
 		ZapOpts:     []zap2.Option{zap2.WithCaller(true)},
 	}
+	opts.BindFlags(flag.CommandLine)
+	klog.InitFlags(flag.CommandLine)
+	flag.Parse()
+	if resultsServiceUri == "" || resultsDirectory == "" {
+		println("Must specify both results-service and results-directory params")
+		os.Exit(1)
+	}
+
 	logger := zap.New(zap.UseFlagOptions(&opts))
 
 	mainLog := logger.WithName("main")
 	klog.SetLogger(mainLog)
 
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
+	files, err := os.ReadDir(resultsDirectory)
 	if err != nil {
-		panic(err.Error())
+		panic(err)
 	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
+	data := resultsservice.ResultsMessage{
+		Results:     map[string]string{},
+		TaskRunName: taskRunName,
+		Namespace:   namespace,
+	}
+	for _, resultsFile := range files {
+		fileContents, err := os.ReadFile(resultsDirectory + "/" + resultsFile.Name())
+		if err != nil {
+			logger.Error(err, "Failed to read results file", "file", resultsFile.Name())
+			panic(err)
+		}
+		data.Results[resultsFile.Name()] = string(fileContents)
+	}
+	marshalled, err := json.Marshal(&data)
+
+	response, err := http.Post(resultsServiceUri, "application/json", bytes.NewReader(marshalled))
 	if err != nil {
-		panic(err.Error())
+		logger.Error(err, "HTTP request failed")
+		panic(err)
 	}
-
-	// load tls certificates
-	serverTLSCert, err := tls.LoadX509KeyPair(CertFilePath, KeyFilePath)
-	if err != nil {
-		log.Fatalf("Error loading certificate and key file: %v", err)
+	if response.StatusCode != 204 {
+		err := fmt.Errorf("expecting response 204, got %d", response.StatusCode)
+		logger.Error(err, "HTTP request failed")
+		panic(err)
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/store-results", &resultsservice.ResultsService{Logger: &mainLog, Client: clientset})
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		MinVersion:   tls.VersionTLS12,
-	}
-	logger.Info("starting HTTP server")
-
-	server := http.Server{
-		Addr:              ":8443",
-		Handler:           mux,
-		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: time.Second * 3,
-	}
-	defer server.Close()
-	log.Fatal(server.ListenAndServeTLS("", ""))
 }

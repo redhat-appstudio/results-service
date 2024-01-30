@@ -25,6 +25,9 @@ type ResultsMessage struct {
 	Results     map[string]string
 }
 
+var GetTaskRun = DefaultGetTaskRun
+var UpdateTaskRun = DefaultUpdateTaskRun
+
 func (s *ResultsService) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
@@ -39,9 +42,7 @@ func (s *ResultsService) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		writer.WriteHeader(400)
 		return
 	}
-	tektonClient := pipelineclientset.New(s.Client.RESTClient())
-	trClient := tektonClient.TektonV1().TaskRuns(message.Namespace)
-	tr, err := trClient.Get(context.Background(), message.TaskRunName, metav1.GetOptions{})
+	tr, err := GetTaskRun(s, message.Namespace, message.TaskRunName)
 
 	if err != nil {
 		writer.WriteHeader(500)
@@ -53,7 +54,7 @@ func (s *ResultsService) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// The results have already been set, this is not good
 			// it means something funky is going on and we should remove all results, as they may be bad
 			tr.Status.Results = []v1.TaskRunResult{}
-			_, err = trClient.UpdateStatus(context.Background(), tr, metav1.UpdateOptions{})
+			err = UpdateTaskRun(s, tr)
 			if err != nil {
 				writer.WriteHeader(500)
 				return
@@ -69,10 +70,24 @@ func (s *ResultsService) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 		tr.Status.Results = append(tr.Status.Results, v1.TaskRunResult{Name: key, Type: v1.ResultsTypeString, Value: v1.ResultValue{Type: v1.ParamTypeString, StringVal: value}})
 	}
-	_, err = trClient.UpdateStatus(context.Background(), tr, metav1.UpdateOptions{})
+	err = UpdateTaskRun(s, tr)
 	if err != nil {
 		writer.WriteHeader(500)
 		return
 	}
 	writer.WriteHeader(204)
+}
+
+func DefaultGetTaskRun(service *ResultsService, namespace string, taskRun string) (*v1.TaskRun, error) {
+	tektonClient := pipelineclientset.New(service.Client.RESTClient())
+	trClient := tektonClient.TektonV1().TaskRuns(namespace)
+	tr, err := trClient.Get(context.Background(), taskRun, metav1.GetOptions{})
+	return tr, err
+}
+func DefaultUpdateTaskRun(service *ResultsService, tr *v1.TaskRun) error {
+	tektonClient := pipelineclientset.New(service.Client.RESTClient())
+	trClient := tektonClient.TektonV1().TaskRuns(tr.Namespace)
+	_, err := trClient.UpdateStatus(context.Background(), tr, metav1.UpdateOptions{})
+	return err
+
 }
